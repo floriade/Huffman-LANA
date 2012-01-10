@@ -76,7 +76,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 	} while (read_seqretry(&fb_priv_cpu->lock, seq));
 
 	if (*dir == TYPE_EGRESS) {	/* temp Fix */
-		printk(KERN_ERR "HUFF ENCODE detected\n");
+		/* printk(KERN_ERR "HUFF ENCODE detected\n"); */
 		if ((encoded = kzalloc(skb->len * 2 * sizeof(char), GFP_ATOMIC)) == NULL) {
 			printk(KERN_ERR "Encoding failed!\n");
 			goto err;
@@ -87,43 +87,52 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 
 		newlen = encode_huffman(skb, encoded, fb_priv_cpu->code_en); 
 
-		printk(KERN_ERR "Newlen: %d\n", newlen);
-		//eth_hdr(skb)->h_proto = htons(skb->len - 14); /* Orig. len */
+		/* printk(KERN_ERR "Newlen: %d\n", newlen);
+		eth_hdr(skb)->h_proto = htons(skb->len - 14); // Orig. len */
 
 		if (newlen < skb->len) {
-			printk(KERN_ERR "Trim\n");
 			skb_trim(skb, newlen);
 		}			
 		else if (newlen > skb->len) {
-			printk(KERN_ERR "Put\n");
 			skb_put(skb, (newlen - skb->len));
 		}
 		memcpy((skb->data + ETH_HDR_LEN + 2), encoded, newlen - (ETH_HDR_LEN+2));
 
-		for (i = 0; i < (skb->len - (ETH_HDR_LEN+2)); i++) {
+		/* for (i = 0; i < (skb->len - (ETH_HDR_LEN+2)); i++) {
 			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+16+i));
-		}		
-		
+		} */		
+		kfree(encoded);
 		read_unlock(&fb_priv_cpu->english_first->tree_lock);
 	}
 	else if (*dir == TYPE_INGRESS) {
-		/*printk(KERN_ERR "HUFF DECODE detected!\n");
-		if ((decoded = kzalloc((skb->len + 1) * sizeof(char), GFP_ATOMIC)) == NULL) {
+		/* printk(KERN_ERR "HUFF DECODE detected!\n"); */
+		newlen = ntohs(*(unsigned short *)(skb->data));
+		if ((decoded = kzalloc((newlen) * sizeof(char), GFP_ATOMIC)) == NULL) {
 			printk(KERN_ERR "Decoding failed!\n");
 			goto err;
-		}
+			}
+
+		/* for (i = 0; i < (skb->len -2); i++) {
+			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+2+i));
+		}*/
 		read_lock(&fb_priv_cpu->english_first->tree_lock);
-		newlen = decode_huffman(skb, decoded, fb_priv_cpu->english_first->first);
+		/* printk(KERN_ERR "len: %d\n", newlen); */
+		decode_huffman(skb, decoded, fb_priv_cpu->english_first->first);
+		newlen += 2; /* 2 Bytes for the length field */
 
 		if (newlen < skb->len)
-			skb_trim(skb, newlen);			
+			skb_trim(skb, newlen);
 		else if (newlen > skb->len)
 			skb_put(skb, (newlen - skb->len));
 
-		memcpy(skb->data, decoded, newlen);
-		read_unlock(&fb_priv_cpu->english_first->tree_lock);*/
+		memcpy(skb->data+2, decoded, newlen-2);
+		/* *(char *)(skb->data+2+newlen) = '\0';
+		printk(KERN_ERR "String %s\n", (skb->data+2)); */
 
-	}	
+		kfree(decoded);
+		read_unlock(&fb_priv_cpu->english_first->tree_lock);
+
+}	
 	
 	
 err:
@@ -442,7 +451,6 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 	unsigned short code;
 	unsigned char freebits = 32;
 	int bitstream = 0;
-	int endian = 0;
 	int counter = 0;
 	unsigned short len = ntohs(*(unsigned short *)(skb->data + ETH_HDR_LEN));	
 	char *tempin = skb->data + ETH_HDR_LEN + 2; /* mac dst/src and eth type */
@@ -484,7 +492,7 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 		}
 		tempin++;
 	}
-	/* Endianess Fun! Yay! */
+	/* Endianess Fun! Yay! 
 
 	if (freebits < 8) {
 		memcpy(tempout, &bitstream, 4 * sizeof(char));
@@ -504,8 +512,10 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 		endian = bitstream >> 24;
 		memcpy(tempout, &endian, 1 * sizeof(char));
 		counter += 1;
-	}
+	}*/
 
+	memcpy(tempout, &bitstream, 4 * sizeof(char));
+	counter += 4;
 	return counter + ETH_HDR_LEN + 2; /* + MAC HEADER */
 //	memcpy(tempout, &bitstream, sizeof(int)); /* copy remaining sequence */
 }
