@@ -17,6 +17,7 @@
 #include <linux/percpu.h>
 #include <linux/prefetch.h>
 #include <linux/ctype.h>
+#include <linux/if_ether.h>
 
 #include "xt_fblock.h"
 #include "xt_builder.h"
@@ -25,11 +26,14 @@
 #include "xt_engine.h"
 #include "xt_builder.h"
 
-#include "fb_huffman.h"
+#include "fb_huff.h"
 
-char *longword = "Antidisestablishmentarianism";
+static unsigned int decode_huffman(struct sk_buff * const skb, char *output, struct huffman_node *node);
+static unsigned int encode_huffman(struct sk_buff * const skb, char *output, struct code_book *code_en);
+
+/*char *longword = "Antidisestablishmentarianism";
 char longwordencode[64];
-char longworddecode[64];
+char longworddecode[64];*/
 
 struct language_book english_book = {EALPHABETSZ, {'\0', 'z', 'q', 'x', 'j', 'k', 'v',
 					'b', 'p', 'y', 'g', 'f', 'w', 'm', 'u', 'c',
@@ -50,8 +54,11 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			  struct sk_buff * const skb,
 			  enum path_type * const dir)
 {
+	int i = 0;
 	int drop = 0;
+	int newlen = 0;
 	unsigned int seq;
+	char *decoded, *encoded;
 	struct fb_huffman_priv __percpu *fb_priv_cpu;
 
 	fb_priv_cpu = this_cpu_ptr(rcu_dereference_raw(fb->private_data));
@@ -60,11 +67,66 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 #endif
 	prefetchw(skb->cb);
 	do {
-		seq = read_seqbegin(&fb_priv_cpu->lock);
+		seq = read_seqbegin(&fb_priv_cpu->lock); 
 		write_next_idp_to_skb(skb, fb->idp, fb_priv_cpu->port[*dir]);
-		if (fb_priv_cpu->port[*dir] == IDP_UNKNOWN)
-			drop = 1;
+		if (fb_priv_cpu->port[*dir] == IDP_UNKNOWN || skb_linearize(skb)) {
+			drop = 1;	/* skb_linearize(skb) checks if buffer is linear */
+			goto err;	/* if not -> linearize. Fail returns != 0 */
+		}
 	} while (read_seqretry(&fb_priv_cpu->lock, seq));
+
+	if (*dir == TYPE_EGRESS) {	/* temp Fix */
+		printk(KERN_ERR "HUFF ENCODE detected\n");
+		if ((encoded = kzalloc(skb->len * 2 * sizeof(char), GFP_ATOMIC)) == NULL) {
+			printk(KERN_ERR "Encoding failed!\n");
+			goto err;
+		}
+		read_lock(&fb_priv_cpu->english_first->tree_lock);
+		//printk(KERN_ERR "Skb len: %d\n", skb->len);
+		//printk(KERN_ERR "My len: %d\n", ntohs(*(unsigned short *)(skb->data + ETH_HDR_LEN)));
+
+		newlen = encode_huffman(skb, encoded, fb_priv_cpu->code_en); 
+
+		printk(KERN_ERR "Newlen: %d\n", newlen);
+		//eth_hdr(skb)->h_proto = htons(skb->len - 14); /* Orig. len */
+
+		if (newlen < skb->len) {
+			printk(KERN_ERR "Trim\n");
+			skb_trim(skb, newlen);
+		}			
+		else if (newlen > skb->len) {
+			printk(KERN_ERR "Put\n");
+			skb_put(skb, (newlen - skb->len));
+		}
+		memcpy((skb->data + ETH_HDR_LEN + 2), encoded, newlen - (ETH_HDR_LEN+2));
+
+		for (i = 0; i < (skb->len - (ETH_HDR_LEN+2)); i++) {
+			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+16+i));
+		}		
+		
+		read_unlock(&fb_priv_cpu->english_first->tree_lock);
+	}
+	else if (*dir == TYPE_INGRESS) {
+		/*printk(KERN_ERR "HUFF DECODE detected!\n");
+		if ((decoded = kzalloc((skb->len + 1) * sizeof(char), GFP_ATOMIC)) == NULL) {
+			printk(KERN_ERR "Decoding failed!\n");
+			goto err;
+		}
+		read_lock(&fb_priv_cpu->english_first->tree_lock);
+		newlen = decode_huffman(skb, decoded, fb_priv_cpu->english_first->first);
+
+		if (newlen < skb->len)
+			skb_trim(skb, newlen);			
+		else if (newlen > skb->len)
+			skb_put(skb, (newlen - skb->len));
+
+		memcpy(skb->data, decoded, newlen);
+		read_unlock(&fb_priv_cpu->english_first->tree_lock);*/
+
+	}	
+	
+	
+err:
 	if (drop) {
 		kfree_skb(skb);
 		return PPE_DROPPED;
@@ -224,7 +286,6 @@ static void delete_tree(struct huffman_node *node)
 	delete_tree(right); /* right child */
 }
 
-/* To free sub-Huffman tree we need a more complex function */
 
 static void deconstruct_schedule(struct schedule_node *first)
 {
@@ -244,7 +305,8 @@ static void deconstruct_schedule(struct schedule_node *first)
     }
 }
 
-static void traverse_tree(struct code_book *code_en, struct huffman_node *node, unsigned char depth, unsigned short counter)
+static void traverse_tree(struct code_book *code_en, struct huffman_node *node,
+				 unsigned char depth, unsigned short counter)
 {
 	unsigned short val;
 	unsigned short temp;
@@ -258,7 +320,7 @@ static void traverse_tree(struct code_book *code_en, struct huffman_node *node, 
 		code_en->code[(node->character) - offset] = val;
 		code_en->length[(node->character) - offset] = depth;
 	}
-		traverse_tree(code_en, node->next[0], depth+1, counter);	/* left child */
+		traverse_tree(code_en, node->next[0], depth+1, counter); /* left child */
 		temp = counter+(1<<((MAXDEPTH -1)-depth));
 		traverse_tree(code_en, node->next[1], depth+1, temp); /* right child */
 
@@ -323,14 +385,13 @@ static struct huffman_node *extract_huffman_tree(struct schedule_node *first)
     return NULL;
 }
 
-static unsigned char append_code(unsigned short code, unsigned char length,
-							unsigned char free, int *bitstream,
-							unsigned char mod)
+static unsigned char append_code(unsigned short code, unsigned char length, unsigned char free,
+					 int *bitstream, unsigned char mod)
 {
 	unsigned char modulo, leftover;
 	int mask, tempbit;
 	leftover = (mod != 0) ? mod : length;
-	if (unlikely(length > free)) {	/* code & mask (nr of bits to append), shift to position */
+	if (unlikely(length > free)) {	/* code & mask (#bits to append), >> to pos */
 		mask = (1 << free) -1;
 		tempbit = (code >> (length - free)) & mask;
 		(*bitstream) = (*bitstream) | tempbit ;
@@ -345,64 +406,77 @@ static unsigned char append_code(unsigned short code, unsigned char length,
 	return modulo;
 }
 
-static void decode_huffman(char *input, char *output, struct huffman_node *node)
+static unsigned int decode_huffman(struct sk_buff * const skb, char *output,
+				 struct huffman_node *node)
 {
 	unsigned char path;
 	unsigned char iteration = 0;
-	char lastchar = 1;
-	char *tempin = input;
+	unsigned short len = ntohs(eth_hdr(skb)->h_proto);
+	unsigned int origlen = len;
+	char *tempin = skb->data;
 	char *tempout = output;
-	int bitstream = *((int *)(tempin));
+	int bitstream = ntohl(*((int *)(tempin)));
 	struct huffman_node *tmpnode;
-	while (lastchar != '\0') {
+	printk(KERN_ERR "Proto:\t%x\n", len);
+	while (len-- != 0) {
 		tmpnode = node;
 		while (tmpnode->next[0] != NULL && tmpnode->next[1] != NULL) {
 			path = (bitstream >> (31 - iteration++)) & 0x1;
 			tmpnode = tmpnode->next[path];
 			if (unlikely(iteration == 32)) {
 				tempin += 4;
-				bitstream = *((int *)(tempin));
+				bitstream = ntohl(*((int *)(tempin)));
 				iteration = 0;
 			}
 		}
-		lastchar = tmpnode->character;
-		*tempout++ = lastchar;
+		*tempout++ = tmpnode->character;
 	}
+return origlen;
 }
 
-static void encode_huffman(struct code_book *code_en, char *input, char *output)
+static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
+					 struct code_book *code_en)
 {
 
 	unsigned char modulo, offset, length;
 	unsigned short code;
 	unsigned char freebits = 32;
 	int bitstream = 0;
-	unsigned char cont = 1;	/* end of text */
-	char *tempin = input;
+	int endian = 0;
+	int counter = 0;
+	unsigned short len = ntohs(*(unsigned short *)(skb->data + ETH_HDR_LEN));	
+	char *tempin = skb->data + ETH_HDR_LEN + 2; /* mac dst/src and eth type */
 	char *tempout = output;
-	while ( cont) {	/* end of string not yet reached */
+	printk(KERN_ERR "Length: %d\n", len);
+	for (counter = 0; counter < len; counter++)
+		printk(KERN_ERR "Data: %d\t0x%2x\n", counter, *(tempin+counter));	
+	counter = 0;
+	while ( len-- != 0) {	/* end of string not yet reached */
+
 		if (islower(*tempin))
 			offset = 96;
 		else if (isupper(*tempin))
 			offset = 64;
-		else if (*tempin == '\0') {
-			offset = 0;
-			cont = 0;
-		}
+		else
+			return 0;
+
 		code = code_en->code[(*tempin)-offset];
 		length = code_en->length[(*tempin)-offset];
+		printk(KERN_ERR "%c -> code: 0x%4x and length: %d\n", *tempin, code, length);
 		modulo = append_code(code, length, freebits, &bitstream, 0);
 		if (likely(modulo == 0))
 			freebits = freebits - length;
 		else if (modulo == 255) {
 			memcpy(tempout, &bitstream, sizeof(int));
 			tempout = tempout + 4;
+			counter += 4;
 			freebits = 32;
 			bitstream = 0;
 		}
 		else {
 			memcpy(tempout, &bitstream, sizeof(int));
 			tempout = tempout + 4;
+			counter += 4;
 			freebits = 32;
 			bitstream = 0;
 			append_code(code, length, freebits, &bitstream, modulo);
@@ -410,7 +484,30 @@ static void encode_huffman(struct code_book *code_en, char *input, char *output)
 		}
 		tempin++;
 	}
-	memcpy(tempout, &bitstream, sizeof(int)); /* copy ..\n sequence */
+	/* Endianess Fun! Yay! */
+
+	if (freebits < 8) {
+		memcpy(tempout, &bitstream, 4 * sizeof(char));
+		counter += 4;
+	}
+	else if (freebits >= 8 && freebits < 16) {
+		endian = bitstream >> 8;
+		memcpy(tempout, &endian, 3 * sizeof(char));
+		counter += 3;	
+	}
+	else if (freebits >= 16 && freebits < 24) {
+		endian = bitstream >> 16;
+		memcpy(tempout, &endian, 2 * sizeof(char));
+		counter += 2;
+	}
+	else if (freebits >= 24 && freebits < 32) {
+		endian = bitstream >> 24;
+		memcpy(tempout, &endian, 1 * sizeof(char));
+		counter += 1;
+	}
+
+	return counter + ETH_HDR_LEN + 2; /* + MAC HEADER */
+//	memcpy(tempout, &bitstream, sizeof(int)); /* copy remaining sequence */
 }
 
 /******************************************************************************
@@ -467,9 +564,9 @@ static struct fblock *fb_huffman_ctor(char *name)
 	traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
 	write_unlock(&english_first_tmp->tree_lock);
 	printk("Done!\n");
-	encode_huffman(code_en_tmp, longword, longwordencode);
+	/*encode_huffman(code_en_tmp, longword, longwordencode);
 	decode_huffman(longwordencode, longworddecode, english_first_tmp->first);
-	printk(KERN_ERR "%s\n", longworddecode);
+	printk(KERN_ERR "%s\n", longworddecode);*/
 
 	get_online_cpus();
 	for_each_online_cpu(cpu) {

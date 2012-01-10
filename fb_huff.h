@@ -22,6 +22,11 @@
 
 #define MAXDEPTH	10
 
+#define HUFF_ENCODE 	0x1234
+#define HUFF_DECODE 	0x4321
+
+#define ETH_HDR_LEN	14
+
 
 struct huffman_root {
 	struct huffman_node *first;
