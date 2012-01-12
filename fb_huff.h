@@ -27,10 +27,11 @@
 
 #define ETH_HDR_LEN	14
 
+#define PROCFS_MAX_SIZE		1024
+
 
 struct huffman_root {
 	struct huffman_node *first;
-	rwlock_t tree_lock;
 };
 
 struct huffman_node {

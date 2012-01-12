@@ -18,6 +18,8 @@
 #include <linux/prefetch.h>
 #include <linux/ctype.h>
 #include <linux/if_ether.h>
+#include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 
 #include "xt_fblock.h"
 #include "xt_builder.h"
@@ -46,6 +48,8 @@ struct language_book english_book = {EALPHABETSZ, {'\0', 'z', 'q', 'x', 'j', 'k'
 struct fb_huffman_priv {
 	idp_t port[2];
 	seqlock_t lock;
+	rwlock_t tree_lock;
+	struct language_book *mybook;
 	struct huffman_root *english_first;	/* Huffman Tree */
 	struct code_book *code_en;		/* Encoding Table */
 };
@@ -54,7 +58,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			  struct sk_buff * const skb,
 			  enum path_type * const dir)
 {
-	int i = 0;
+	//int i = 0;
 	int drop = 0;
 	int newlen = 0;
 	unsigned int seq;
@@ -81,7 +85,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			printk(KERN_ERR "Encoding failed!\n");
 			goto err;
 		}
-		read_lock(&fb_priv_cpu->english_first->tree_lock);
+		read_lock(&fb_priv_cpu->tree_lock);
 		//printk(KERN_ERR "Skb len: %d\n", skb->len);
 		//printk(KERN_ERR "My len: %d\n", ntohs(*(unsigned short *)(skb->data + ETH_HDR_LEN)));
 
@@ -102,7 +106,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+16+i));
 		} */		
 		kfree(encoded);
-		read_unlock(&fb_priv_cpu->english_first->tree_lock);
+		read_unlock(&fb_priv_cpu->tree_lock);
 	}
 	else if (*dir == TYPE_INGRESS) {
 		/* printk(KERN_ERR "HUFF DECODE detected!\n"); */
@@ -115,7 +119,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 		/* for (i = 0; i < (skb->len -2); i++) {
 			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+2+i));
 		}*/
-		read_lock(&fb_priv_cpu->english_first->tree_lock);
+		read_lock(&fb_priv_cpu->tree_lock);
 		/* printk(KERN_ERR "len: %d\n", newlen); */
 		decode_huffman(skb, decoded, fb_priv_cpu->english_first->first);
 		newlen += 2; /* 2 Bytes for the length field */
@@ -130,7 +134,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 		printk(KERN_ERR "String %s\n", (skb->data+2)); */
 
 		kfree(decoded);
-		read_unlock(&fb_priv_cpu->english_first->tree_lock);
+		read_unlock(&fb_priv_cpu->tree_lock);
 
 }	
 	
@@ -235,7 +239,6 @@ static unsigned char struct_ctor(struct huffman_root *root, struct schedule_node
 	}
 
 	root-> first = NULL;
-	rwlock_init(&root->tree_lock);
 
 	sched->huffman = NULL;
 	sched->next = NULL;
@@ -291,27 +294,68 @@ static void delete_tree(struct huffman_node *node)
 
 	kfree(node);
 
-	delete_tree(left);	/* left child */
-	delete_tree(right); /* right child */
+	delete_tree(left);	// left child 
+	delete_tree(right); // right child 
+}
+
+static void delete_treev2(struct huffman_node *tree)
+{
+	struct huffman_node *curr, *previous;
+
+	if (tree == NULL) {
+		printk(KERN_ERR "Tree is NULL\n");
+		return;
+	}
+
+	curr = tree;
+	previous = curr;
+
+	while (1) {
+		if (curr->next[0] != NULL) {
+			previous = curr;
+			curr = curr->next[0];
+		}
+		else if (curr->next[1] != NULL) {
+			previous = curr;
+			curr = curr->next[1];
+		}
+		else { /* leaf node */
+			if (previous->next[0] == NULL)
+				previous->next[1] = NULL;
+			else
+				previous->next[0] = NULL;
+
+			kfree(curr);
+			if (curr == tree)
+				break;
+			curr = tree;
+		}
+	}
 }
 
 
 static void deconstruct_schedule(struct schedule_node *first)
 {
-    struct schedule_node *tmpold = NULL;
-    struct schedule_node *tmp = first;
-    while (1) {
-        if(tmp->huffman != NULL)
-            delete_tree(tmp->huffman);
-        tmpold = tmp;
-        if(tmp->next != NULL)
-		tmp = tmp->next;
-        else {
-		kfree(tmpold);
-		break;
-        }
-        kfree(tmpold);
-    }
+	struct schedule_node *tmpold = NULL;
+	struct schedule_node *tmp = first;
+
+	if (first == NULL) {
+		printk(KERN_ERR "Deconstruct Schedule: NULL pointer!\n");
+		return;
+	}
+	
+	while (1) {
+		if(tmp->huffman != NULL)
+		    delete_treev2(tmp->huffman);
+		tmpold = tmp;
+		if(tmp->next != NULL)
+			tmp = tmp->next;
+		else {
+			kfree(tmpold);
+			break;
+		}
+	kfree(tmpold);
+	}
 }
 
 static void traverse_tree(struct code_book *code_en, struct huffman_node *node,
@@ -519,6 +563,232 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 	return counter + ETH_HDR_LEN + 2; /* + MAC HEADER */
 //	memcpy(tempout, &bitstream, sizeof(int)); /* copy remaining sequence */
 }
+/******************************************************************************
+ *	Proc fs
+ *	Functionality
+ *****************************************************************************/
+
+static int fb_huff_proc_show(struct seq_file *m, void *v)
+{
+	int i = 0;
+	struct fblock *fb = (struct fblock *) m->private;
+	struct fb_huffman_priv *fb_priv_cpu;
+	struct fb_huffman_priv __percpu *fb_priv;
+	struct language_book *mybook;
+
+	printk(KERN_ERR "Read detected\n");
+
+	rcu_read_lock();
+	fb_priv = (struct fb_huffman_priv __percpu *) rcu_dereference_raw(fb->private_data);
+	fb_priv_cpu = per_cpu_ptr(fb_priv, 0);	/* CPUs share same priv. d */
+	rcu_read_unlock();
+
+	read_lock(&fb_priv_cpu->tree_lock);
+	mybook = fb_priv_cpu->mybook;
+	for (i = 0; i < mybook->length; i++) {
+		printk(KERN_ERR "Char:\t%c | Freq:\t%d\n", mybook->character[i], mybook->frequency[i]);
+	}
+	printk(KERN_ERR "Length:\t%d\n", mybook->length);
+	read_unlock(&fb_priv_cpu->tree_lock);
+	return 0;
+}
+
+static int fb_huff_proc_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, fb_huff_proc_show, PDE(inode)->data);
+}
+
+static ssize_t fb_huff_proc_write(struct file *file, const char __user * ubuff,
+				 size_t count, loff_t * offset)
+{
+        int len;
+	unsigned int cpu;
+	char *temp, *oldtemp, *procfs_buffer;
+	struct schedule_node *sched_tmp;
+	struct huffman_root *english_first_tmp;
+	struct code_book *code_en_tmp;
+	struct language_book *mybook;
+	struct fb_huffman_priv __percpu *fb_priv;
+	struct fb_huffman_priv *fb_priv_cpu;
+	int i = 0;
+	struct fblock *fb = PDE(file->f_path.dentry->d_inode)->data;
+
+	printk(KERN_ERR "Write detected\n");	// OK1
+
+	rcu_read_lock();							// & 
+	fb_priv = (struct fb_huffman_priv __percpu *) rcu_dereference_raw(fb->private_data);
+	fb_priv_cpu = per_cpu_ptr(fb_priv, 0);	// CPUs share same priv. d 
+	rcu_read_unlock();							// ¬ 
+
+        if(count > PROCFS_MAX_SIZE) {
+		printk(KERN_ERR "Count is too big\n");
+                goto ERROR0;
+	}
+        else
+                len = count;
+	
+	if (!(mybook = kzalloc(sizeof(struct language_book), GFP_ATOMIC))) {
+		printk(KERN_ERR "Mybook Alloc failed!\n");
+		goto ERROR1;
+	}
+	if (!(procfs_buffer = kzalloc(PROCFS_MAX_SIZE * sizeof(char), GFP_ATOMIC))) {
+		printk(KERN_ERR "Procfs_buffer Alloc failed!\n");
+		goto ERROR2;
+	}
+        if(copy_from_user(procfs_buffer, ubuff, len)) {
+		printk(KERN_ERR "Copy_from_user failed!\n");
+		goto ERROR3;
+        }
+
+        procfs_buffer[len] = '\0';
+	temp = procfs_buffer;
+
+	while (*temp != '#') {
+		if (*temp == '\n') {
+			temp++;
+			continue;
+		}
+		if ((oldtemp = strsep(&temp, ":")) == NULL)
+			break;
+		printk(KERN_ERR "Oldtemp: %s\n", oldtemp);
+		if((i%2) == 0) { // char 
+			mybook->character[i/2] = *oldtemp;
+		}
+		else { // freq 
+			mybook->frequency[i/2] = simple_strtoul (oldtemp, (char **) &temp-1, 10);
+			if (mybook->frequency[i/2] < 0 || mybook->frequency[i/2] > 65535) {
+				printk(KERN_ERR "simple_strtoul failed! Check Input File!\n");
+				kfree(mybook);
+				goto out;
+			}
+		}
+		i++;
+	}
+
+	mybook->length = i/2;	// OK2 
+	goto passed;
+
+out:
+	write_lock(&fb_priv_cpu->tree_lock);			// & 
+	if (fb_priv_cpu->mybook != &english_book)
+		kfree(fb_priv_cpu->mybook); // free old book if not english 
+	
+	get_online_cpus();// & 
+	for_each_online_cpu(cpu) {
+		fb_priv_cpu = per_cpu_ptr(fb_priv, cpu);
+		write_seqlock(&fb_priv_cpu->lock); // & 
+		fb_priv_cpu->mybook = &english_book;// default 
+		write_sequnlock(&fb_priv_cpu->lock);// ¬ 
+	}
+	put_online_cpus();// ¬ 
+	write_unlock(&fb_priv_cpu->tree_lock);			// ¬ 
+
+	kfree(procfs_buffer);
+        return len;
+
+
+passed:
+	code_en_tmp = kzalloc(sizeof(struct code_book), GFP_ATOMIC);
+	if (!code_en_tmp)
+		goto out;
+	english_first_tmp = kzalloc(sizeof(struct huffman_root), GFP_ATOMIC);
+	if (!english_first_tmp)
+		goto err1;	
+	sched_tmp = kzalloc(sizeof(struct schedule_node), GFP_ATOMIC);
+	if (!sched_tmp)
+		goto err2;
+
+	if (!struct_ctor(english_first_tmp, sched_tmp, code_en_tmp))
+		goto sched_fail;
+
+	if (construct_schedule(&english_book, sched_tmp) == NULL) {
+		printk(KERN_ERR "Scheduler failed!\n");
+		goto sched_fail;
+	}
+	printk(KERN_ERR "Scheduler passed!\n");
+
+	if ((english_first_tmp->first = extract_huffman_tree(sched_tmp)) == NULL) {
+        	printk(KERN_ERR "Tree extraction failed!\n");
+        	goto tree_fail;
+    }
+	printk(KERN_ERR "Tree extracted!\n");
+
+	traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
+	printk(KERN_ERR "Tree traversed!\n");	// OK3
+
+	printk(KERN_ERR "1\n");
+
+	get_online_cpus();// & 
+	for_each_online_cpu(cpu) { // 
+		fb_priv_cpu = per_cpu_ptr(fb_priv, cpu); 
+		write_seqlock(&fb_priv_cpu->lock); // &
+		write_lock(&fb_priv_cpu->tree_lock);
+ 
+		printk(KERN_ERR "1a\n");// & OK4 (nachfolgend ist der kritische Bereich)
+		if (fb_priv_cpu->mybook != &english_book && cpu == 0) { // if not default book delete old book
+			printk(KERN_ERR "1b\n");
+			kfree(fb_priv_cpu->mybook); // SAFE free old book if not english 
+		}
+		printk(KERN_ERR "1c\n");
+		fb_priv_cpu->mybook = mybook;		// link new book
+
+		if (fb_priv_cpu->english_first != NULL && cpu == 0) {
+			printk(KERN_ERR "1d\n");
+			delete_treev2(fb_priv_cpu->english_first->first);// delete huff tree
+			printk(KERN_ERR "1e\n"); 
+			kfree(fb_priv_cpu->english_first);		// delete first node
+			printk(KERN_ERR "1f\n");
+		}
+		fb_priv_cpu->english_first = english_first_tmp; // link new tree
+
+		printk(KERN_ERR "1g\n");
+		if (cpu == 0)
+			kfree(fb_priv_cpu->code_en);		// delete old code
+		printk(KERN_ERR "1h\n"); 
+		fb_priv_cpu->code_en = code_en_tmp; 	// link new code
+		printk(KERN_ERR "1i\n");
+		write_unlock(&fb_priv_cpu->tree_lock); 			// ¬  (Ende des kritischen Bereichs)		
+		write_sequnlock(&fb_priv_cpu->lock);// ¬ 
+	
+	}
+	put_online_cpus();// ¬ 
+	printk(KERN_ERR "4\n"); 
+	printk(KERN_ERR "5\n");
+	kfree(procfs_buffer);
+	printk(KERN_ERR "New Alphabet successfully added!\n");
+        return len;
+
+tree_fail:
+	delete_treev2(english_first_tmp->first);
+	goto err2;
+sched_fail:
+	deconstruct_schedule(sched_tmp);
+err2:
+	kfree(english_first_tmp);
+err1:
+	kfree(code_en_tmp);
+	goto out;
+
+ERROR3:
+	kfree(procfs_buffer);
+	len= -EFAULT;
+ERROR2:
+	kfree(mybook);
+ERROR1:
+	return len;
+ERROR0:
+	len = -EINVAL;
+	return len;
+}
+
+static const struct file_operations fb_huff_proc_fops = {
+	.owner = THIS_MODULE,
+	.open = fb_huff_proc_open,
+	.read = seq_read,
+	.write = fb_huff_proc_write,
+	.llseek = seq_lseek,
+	.release = single_release,
+};
 
 /******************************************************************************
  *	Module Ctor/Dtor/Init/Deinit
@@ -529,6 +799,7 @@ static struct fblock *fb_huffman_ctor(char *name)
 {
 	int ret = 0;
 	unsigned int cpu;
+	struct proc_dir_entry *fb_proc;
 	struct fblock *fb;
 	struct fb_huffman_priv __percpu *fb_priv;
 
@@ -557,7 +828,7 @@ static struct fblock *fb_huffman_ctor(char *name)
 	if (!struct_ctor(english_first_tmp, sched_tmp, code_en_tmp))
 		goto sched_fail;		
 	
-	write_lock(&english_first_tmp->tree_lock);
+	//write_lock(&english_first_tmp->tree_lock);
 
 	if (construct_schedule(&english_book, sched_tmp) == NULL) {
 		printk(KERN_ERR "Scheduler failed!\n");
@@ -572,7 +843,7 @@ static struct fblock *fb_huffman_ctor(char *name)
     }
 
 	traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
-	write_unlock(&english_first_tmp->tree_lock);
+	//write_unlock(&english_first_tmp->tree_lock);
 	printk("Done!\n");
 	/*encode_huffman(code_en_tmp, longword, longwordencode);
 	decode_huffman(longwordencode, longworddecode, english_first_tmp->first);
@@ -583,10 +854,12 @@ static struct fblock *fb_huffman_ctor(char *name)
 		struct fb_huffman_priv *fb_priv_cpu;
 		fb_priv_cpu = per_cpu_ptr(fb_priv, cpu);
 		seqlock_init(&fb_priv_cpu->lock);
+		rwlock_init(&fb_priv_cpu->tree_lock);
 		fb_priv_cpu->port[0] = IDP_UNKNOWN;
 		fb_priv_cpu->port[1] = IDP_UNKNOWN;
 		fb_priv_cpu->code_en = code_en_tmp;
 		fb_priv_cpu->english_first = english_first_tmp;
+		fb_priv_cpu->mybook = &english_book;
 	}
 	put_online_cpus();
 
@@ -595,6 +868,13 @@ static struct fblock *fb_huffman_ctor(char *name)
 		goto tree_fail;
 	fb->netfb_rx = fb_huffman_netrx;
 	fb->event_rx = fb_huffman_event;
+
+	fb_proc = proc_create_data(fb->name, 0444, fblock_proc_dir,
+				   &fb_huff_proc_fops,
+				   (void *)(long) fb);
+	if (!fb_proc)
+		goto seclast;
+
 	ret = register_fblock_namespace(fb);
 	if (ret)
 		goto last;
@@ -602,15 +882,17 @@ static struct fblock *fb_huffman_ctor(char *name)
 	return fb;
 
 last:
+	remove_proc_entry(fb->name, fblock_proc_dir);
+seclast:
 	cleanup_fblock_ctor(fb);
 
 tree_fail:
-	delete_tree(english_first_tmp->first);
-	write_unlock(&english_first_tmp->tree_lock);
+	delete_treev2(english_first_tmp->first);
+	//write_unlock(&english_first_tmp->tree_lock);
 	goto err4;
 sched_fail:
 	deconstruct_schedule(sched_tmp);
-	write_unlock(&english_first_tmp->tree_lock);
+	//write_unlock(&english_first_tmp->tree_lock);
 err4:
 	kfree(english_first_tmp);
 err3:
@@ -632,12 +914,16 @@ static void fb_huffman_dtor(struct fblock *fb)
 	fb_priv_cpu = per_cpu_ptr(fb_priv, 0);	/* CPUs share same priv. d */
 	rcu_read_unlock();
 
-	write_lock(&fb_priv_cpu->english_first->tree_lock);
-	delete_tree(fb_priv_cpu->english_first->first);	/* delete huff tree */
-	kfree(fb_priv_cpu->english_first);	/* delete first node */
+	write_lock(&fb_priv_cpu->tree_lock);
+	if (fb_priv_cpu->english_first != NULL) {
+		delete_treev2(fb_priv_cpu->english_first->first);	/* delete huff tree */
+		kfree(fb_priv_cpu->english_first);	/* delete first node */
+	}	
 	kfree(fb_priv_cpu->code_en);		/* delete encoding book */
-	write_unlock(&fb_priv_cpu->english_first->tree_lock);
+	write_unlock(&fb_priv_cpu->tree_lock);
+
 	free_percpu(rcu_dereference_raw(fb->private_data));
+	remove_proc_entry(fb->name, fblock_proc_dir);
 	module_put(THIS_MODULE);
 }
 
