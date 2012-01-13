@@ -16,6 +16,8 @@
 
 #define ENGLISH		0
 #define EALPHABETSZ	27
+#define MAXALPHABETSZ	255
+#define ASCIISZ		128
 #define GERMAN 		1
 
 #define ALPHABETSZ	50
@@ -38,6 +40,7 @@ struct huffman_node {
 	unsigned char character;
 	unsigned int frequency;
 	struct huffman_node *next[2];
+	struct huffman_node *previous;
 };
 
 struct schedule_node {
@@ -47,8 +50,8 @@ struct schedule_node {
 
 struct language_book {
 	unsigned char length;
-	unsigned char character[ALPHABETSZ];
-	unsigned short frequency[ALPHABETSZ];
+	unsigned char character[ASCIISZ];
+	unsigned short frequency[ASCIISZ];
 };
 
 struct code_book {

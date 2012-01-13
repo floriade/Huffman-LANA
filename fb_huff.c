@@ -228,12 +228,12 @@ static int fb_huffman_event(struct notifier_block *self, unsigned long cmd,
  *****************************************************************************/
 
 static unsigned char struct_ctor(struct huffman_root *root, struct schedule_node *sched,
-				struct code_book *book)
+				struct code_book *book, unsigned char len)
 {
-	book->alphabetsz = EALPHABETSZ;
-	if ((book->code = kzalloc(EALPHABETSZ * sizeof(unsigned short), GFP_ATOMIC)) == NULL)
+	book->alphabetsz = len;
+	if ((book->code = kzalloc(MAXALPHABETSZ * sizeof(unsigned short), GFP_ATOMIC)) == NULL)
 		return 0;
-	if ((book->length = kzalloc(EALPHABETSZ * sizeof(unsigned char), GFP_ATOMIC)) == NULL) {
+	if ((book->length = kzalloc(MAXALPHABETSZ * sizeof(unsigned char), GFP_ATOMIC)) == NULL) {
 		kfree(book->code);
 		return 0;
 	}
@@ -246,7 +246,7 @@ static unsigned char struct_ctor(struct huffman_root *root, struct schedule_node
 }
 
 static struct schedule_node *construct_schedule(struct language_book *book,
-                                          struct schedule_node *first)
+                                          struct schedule_node *first, struct huffman_node **ptrArray)
 {
 	int i;
 	struct huffman_node *tmphuff;
@@ -276,6 +276,8 @@ static struct schedule_node *construct_schedule(struct language_book *book,
 		tmphuff->frequency = book->frequency[i];
 		tmphuff->next[0] = NULL;
 		tmphuff->next[1] = NULL;
+		tmphuff->previous = NULL;
+		ptrArray[book->character[i]] = tmphuff;
 		tmpschedold = tmpsched;
     	};	
 	tmpsched->next = NULL; /* last elem */
@@ -283,7 +285,7 @@ static struct schedule_node *construct_schedule(struct language_book *book,
     	return tmpsched;
 }
 
-static void delete_tree(struct huffman_node *node)
+/*static void delete_tree(struct huffman_node *node)
 {
 	struct huffman_node *left, *right;
 
@@ -296,7 +298,7 @@ static void delete_tree(struct huffman_node *node)
 
 	delete_tree(left);	// left child 
 	delete_tree(right); // right child 
-}
+}*/
 
 static void delete_treev2(struct huffman_node *tree)
 {
@@ -358,7 +360,36 @@ static void deconstruct_schedule(struct schedule_node *first)
 	}
 }
 
-static void traverse_tree(struct code_book *code_en, struct huffman_node *node,
+static void traverse_treev2(struct code_book *code_en, struct huffman_node *node,
+			    struct huffman_node **ptrArray)
+{
+	int i, pos, code;
+	char currchar;
+	struct huffman_node *curr, *currold;
+
+	for (i = 0; i < MAXALPHABETSZ; i++) {
+		if ((curr = ptrArray[i]) == NULL)
+			continue;
+		currchar = curr->character;		
+		pos = 0;
+		code = 0;
+		while(1) {
+			if (curr == node) {
+				code_en->length[(unsigned char)currchar] = pos;
+				code_en->code[(unsigned char)currchar] = code;
+				break;
+			}
+			currold = curr;
+			curr = curr->previous;
+			if (curr->next[0] == currold) 
+				code += 0<<pos++;
+			else 
+				code += 1<<pos++;	
+		}
+	}
+}
+
+/*static void traverse_tree(struct code_book *code_en, struct huffman_node *node,
 				 unsigned char depth, unsigned short counter)
 {
 	unsigned short val;
@@ -373,11 +404,11 @@ static void traverse_tree(struct code_book *code_en, struct huffman_node *node,
 		code_en->code[(node->character) - offset] = val;
 		code_en->length[(node->character) - offset] = depth;
 	}
-		traverse_tree(code_en, node->next[0], depth+1, counter); /* left child */
+		traverse_tree(code_en, node->next[0], depth+1, counter); // left child 
 		temp = counter+(1<<((MAXDEPTH -1)-depth));
-		traverse_tree(code_en, node->next[1], depth+1, temp); /* right child */
+		traverse_tree(code_en, node->next[1], depth+1, temp); // right child 
 
-}
+}*/
 
 static void insert_schedule_node(struct schedule_node *node,
                            struct schedule_node *tree)
@@ -418,7 +449,9 @@ static struct huffman_node *extract_huffman_tree(struct schedule_node *first)
         }
         parent->character = 0;
         parent->next[0] = tmp1;     /* smaller is left */
+	tmp1->previous = parent;	
         parent->next[1] = tmp2;     /* larger is right */
+	tmp2->previous = parent;
         parent->frequency = tmp1->frequency + tmp2->frequency;
         tmp->next->huffman = parent;/* 2nd sched points to parent now */
         if (firstcpy->next->next == NULL) {	/* schedule tree empty */
@@ -491,7 +524,7 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 					 struct code_book *code_en)
 {
 
-	unsigned char modulo, offset, length;
+	unsigned char modulo, length;
 	unsigned short code;
 	unsigned char freebits = 32;
 	int bitstream = 0;
@@ -505,15 +538,18 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 	counter = 0;
 	while ( len-- != 0) {	/* end of string not yet reached */
 
-		if (islower(*tempin))
+		/*if (islower(*tempin))
 			offset = 96;
 		else if (isupper(*tempin))
 			offset = 64;
 		else
-			return 0;
+			return 0; */
 
-		code = code_en->code[(*tempin)-offset];
-		length = code_en->length[(*tempin)-offset];
+		code = code_en->code[(unsigned char)*tempin]; // was - offset
+		if ((length = code_en->length[(unsigned char)*tempin]) == 0) { // was - offset
+			printk(KERN_ERR "Symbol %c not in alphabet!\n", *tempin);
+			return 0;
+		}
 		printk(KERN_ERR "%c -> code: 0x%4x and length: %d\n", *tempin, code, length);
 		modulo = append_code(code, length, freebits, &bitstream, 0);
 		if (likely(modulo == 0))
@@ -608,6 +644,7 @@ static ssize_t fb_huff_proc_write(struct file *file, const char __user * ubuff,
 	struct huffman_root *english_first_tmp;
 	struct code_book *code_en_tmp;
 	struct language_book *mybook;
+	struct huffman_node **ptrArray;
 	struct fb_huffman_priv __percpu *fb_priv;
 	struct fb_huffman_priv *fb_priv_cpu;
 	int i = 0;
@@ -644,7 +681,7 @@ static ssize_t fb_huff_proc_write(struct file *file, const char __user * ubuff,
 	temp = procfs_buffer;
 
 	while (*temp != '#') {
-		if (*temp == '\n') {
+		if (*temp == '\n') { /* FIX ME to support newline */
 			temp++;
 			continue;
 		}
@@ -662,7 +699,10 @@ static ssize_t fb_huff_proc_write(struct file *file, const char __user * ubuff,
 				goto out;
 			}
 		}
-		i++;
+		if (i++ > MAXALPHABETSZ) {
+			printk(KERN_ERR "Error: Alphabet is full\n");
+			goto out;
+		}
 	}
 
 	mybook->length = i/2;	// OK2 
@@ -688,9 +728,12 @@ out:
 
 
 passed:
+	ptrArray = kzalloc(MAXALPHABETSZ * sizeof(struct huffman_node *), GFP_ATOMIC);
+	if(!ptrArray)
+		goto out;
 	code_en_tmp = kzalloc(sizeof(struct code_book), GFP_ATOMIC);
 	if (!code_en_tmp)
-		goto out;
+		goto erra;	
 	english_first_tmp = kzalloc(sizeof(struct huffman_root), GFP_ATOMIC);
 	if (!english_first_tmp)
 		goto err1;	
@@ -698,10 +741,10 @@ passed:
 	if (!sched_tmp)
 		goto err2;
 
-	if (!struct_ctor(english_first_tmp, sched_tmp, code_en_tmp))
+	if (!struct_ctor(english_first_tmp, sched_tmp, code_en_tmp, mybook->length))
 		goto sched_fail;
 
-	if (construct_schedule(&english_book, sched_tmp) == NULL) {
+	if (construct_schedule(mybook, sched_tmp, ptrArray) == NULL) {
 		printk(KERN_ERR "Scheduler failed!\n");
 		goto sched_fail;
 	}
@@ -713,7 +756,8 @@ passed:
     }
 	printk(KERN_ERR "Tree extracted!\n");
 
-	traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
+	// traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
+	traverse_treev2(code_en_tmp, english_first_tmp->first, ptrArray);
 	printk(KERN_ERR "Tree traversed!\n");	// OK3
 
 	printk(KERN_ERR "1\n");
@@ -754,6 +798,8 @@ passed:
 	put_online_cpus();// ¬ 
 	printk(KERN_ERR "4\n"); 
 	printk(KERN_ERR "5\n");
+	kfree(sched_tmp);
+	kfree(ptrArray);
 	kfree(procfs_buffer);
 	printk(KERN_ERR "New Alphabet successfully added!\n");
         return len;
@@ -763,16 +809,21 @@ tree_fail:
 	goto err2;
 sched_fail:
 	deconstruct_schedule(sched_tmp);
+	kfree(sched_tmp);
+	kfree(code_en_tmp->length);
+	kfree(code_en_tmp->code);
 err2:
 	kfree(english_first_tmp);
 err1:
 	kfree(code_en_tmp);
+erra:
+	kfree(ptrArray);
 	goto out;
 
 ERROR3:
 	kfree(procfs_buffer);
 	len= -EFAULT;
-ERROR2:
+ERROR2:	
 	kfree(mybook);
 ERROR1:
 	return len;
@@ -802,6 +853,7 @@ static struct fblock *fb_huffman_ctor(char *name)
 	struct proc_dir_entry *fb_proc;
 	struct fblock *fb;
 	struct fb_huffman_priv __percpu *fb_priv;
+	struct huffman_node **ptrArray;
 
 	struct schedule_node *sched_tmp;
 	struct huffman_root *english_first_tmp;
@@ -814,7 +866,9 @@ static struct fblock *fb_huffman_ctor(char *name)
 	fb_priv = alloc_percpu(struct fb_huffman_priv);
 	if (!fb_priv)
 		goto err;
-
+	ptrArray = kzalloc(MAXALPHABETSZ * sizeof(struct huffman_node *), GFP_ATOMIC);
+	if(!ptrArray)
+		goto err1;
 	code_en_tmp = kzalloc(sizeof(struct code_book), GFP_ATOMIC);
 	if (!code_en_tmp)
 		goto err2;
@@ -825,12 +879,12 @@ static struct fblock *fb_huffman_ctor(char *name)
 	if (!sched_tmp)
 		goto err4;
 
-	if (!struct_ctor(english_first_tmp, sched_tmp, code_en_tmp))
+	if (!struct_ctor(english_first_tmp, sched_tmp, code_en_tmp, english_book.length))
 		goto sched_fail;		
 	
 	//write_lock(&english_first_tmp->tree_lock);
 
-	if (construct_schedule(&english_book, sched_tmp) == NULL) {
+	if (construct_schedule(&english_book, sched_tmp, ptrArray) == NULL) {
 		printk(KERN_ERR "Scheduler failed!\n");
 		goto sched_fail;
 	}
@@ -842,7 +896,8 @@ static struct fblock *fb_huffman_ctor(char *name)
         	goto tree_fail;
     }
 
-	traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
+	//traverse_tree(code_en_tmp, english_first_tmp->first, 0, 0);
+	traverse_treev2(code_en_tmp, english_first_tmp->first, ptrArray);
 	//write_unlock(&english_first_tmp->tree_lock);
 	printk("Done!\n");
 	/*encode_huffman(code_en_tmp, longword, longwordencode);
@@ -878,6 +933,7 @@ static struct fblock *fb_huffman_ctor(char *name)
 	ret = register_fblock_namespace(fb);
 	if (ret)
 		goto last;
+	kfree(sched_tmp);
 	__module_get(THIS_MODULE);
 	return fb;
 
@@ -891,13 +947,18 @@ tree_fail:
 	//write_unlock(&english_first_tmp->tree_lock);
 	goto err4;
 sched_fail:
+	kfree(code_en_tmp->code);
+	kfree(code_en_tmp->length);
 	deconstruct_schedule(sched_tmp);
+	kfree(sched_tmp);
 	//write_unlock(&english_first_tmp->tree_lock);
 err4:
 	kfree(english_first_tmp);
 err3:
 	kfree(code_en_tmp);
-err2:	
+err2:
+	kfree(ptrArray);
+err1:	
 	free_percpu(fb_priv);
 err:
 	kfree_fblock(fb);
@@ -918,7 +979,9 @@ static void fb_huffman_dtor(struct fblock *fb)
 	if (fb_priv_cpu->english_first != NULL) {
 		delete_treev2(fb_priv_cpu->english_first->first);	/* delete huff tree */
 		kfree(fb_priv_cpu->english_first);	/* delete first node */
-	}	
+	}
+	kfree(fb_priv_cpu->code_en->length);	
+	kfree(fb_priv_cpu->code_en->code);		
 	kfree(fb_priv_cpu->code_en);		/* delete encoding book */
 	write_unlock(&fb_priv_cpu->tree_lock);
 
