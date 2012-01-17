@@ -37,13 +37,23 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output, str
 char longwordencode[64];
 char longworddecode[64];*/
 
-struct language_book english_book = {EALPHABETSZ, {'\0', 'z', 'q', 'x', 'j', 'k', 'v',
+/*struct language_book english_book = {EALPHABETSZ, {'0', 'z', 'q', 'x', 'j', 'k', 'v',
 					'b', 'p', 'y', 'g', 'f', 'w', 'm', 'u', 'c',
 					'l', 'd', 'r', 'h', 's', 'n', 'i', 'o', 'a',
 					't', 'e'}, {3, 74, 95, 150, 153, 772, 978, 1492,
 					1929, 1974, 2015, 2228, 2360, 2406, 2758, 2782,
 					4025, 4253, 5987, 6094, 6327, 6749, 6966, 7507,
-					8167, 9056, 12700}};
+					8167, 9056, 12700}};*/
+
+struct language_book english_book = {EALPHABETSZ + 1, {'0', 'z', 'q', 'x', 'j', 'k', 'v',
+					'b', 'p', 'y', 'g', 'f', 'w', 'm', 'u', 'c',
+					'l', 'd', 'r', 'h', 's', 'n', 'i', 'o', 'a',
+					't', 'e', ' '}, {3, 74, 95, 150, 153, 772, 978, 1492,
+					1929, 1974, 2015, 2228, 2360, 2406, 2758, 2782,
+					4025, 4253, 5987, 6094, 6327, 6749, 6966, 7507,
+					8167, 9056, 12700, 14000}};
+
+/*struct language_book english_book = { 86, {'#', '%', '}', '{', '@', '$', '_', 'Z', '/', '[', ']', 'Q', 'K', '&', 'X', '6', '9', '7', '*', '3', '4', '(', ')', 'U', '8', '2', ':', '5', 'J', '1', 'R', 'L', 'G', '0', 'O', 'E', 'P', 'z', 'N', '!', 'F', 'j', 'S', 'Y', 'q', 'H', 'V', 'W', 'B', 'D', 'C', 'x', '\'', 'T', '?', 'A', 'M', ';', '-', 'I', 'k', 'v', '.', 'b', '\"', 'p', 'g', 'y', 'w', 'f', ',', 'c', 'm', '\n', 'u', 'l', 'd', 'r', 'h', 's', 'i', 'n', 'o', 'a', 't', 'e', ' ' },{1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 5, 5, 6, 6, 7, 7, 8, 11, 13, 33, 33, 34, 39, 41, 50, 53, 56, 60, 61, 65, 65, 65, 69, 74, 76, 79, 85, 86, 99, 136, 142, 158, 171, 172, 178, 221, 223, 308, 388, 467, 719, 818, 954, 1140, 1241, 1289, 1512, 1546, 1622, 1688, 1811, 1886, 2031, 2233, 2963, 3397, 4466, 4613, 4637, 4904, 5049, 5795, 5974, 6527, 9654, 15646}};*/
 
 struct fb_huffman_priv {
 	idp_t port[2];
@@ -58,7 +68,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			  struct sk_buff * const skb,
 			  enum path_type * const dir)
 {
-	//int i = 0;
+	int i = 0;
 	int drop = 0;
 	int newlen = 0;
 	unsigned int seq;
@@ -78,8 +88,8 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			goto err;	/* if not -> linearize. Fail returns != 0 */
 		}
 	} while (read_seqretry(&fb_priv_cpu->lock, seq));
-
-	if (*dir == TYPE_EGRESS) {	/* temp Fix */
+	//printk(KERN_ERR "Type: 0x%4x\n", ntohs(eth_hdr(skb)->h_proto));
+	if (*dir == TYPE_EGRESS && ntohs(eth_hdr(skb)->h_proto) == 0xacdc) {	/* temp Fix */
 		/* printk(KERN_ERR "HUFF ENCODE detected\n"); */
 		if ((encoded = kzalloc(skb->len * 2 * sizeof(char), GFP_ATOMIC)) == NULL) {
 			printk(KERN_ERR "Encoding failed!\n");
@@ -89,8 +99,10 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 		//printk(KERN_ERR "Skb len: %d\n", skb->len);
 		//printk(KERN_ERR "My len: %d\n", ntohs(*(unsigned short *)(skb->data + ETH_HDR_LEN)));
 
-		newlen = encode_huffman(skb, encoded, fb_priv_cpu->code_en); 
-
+		if ((newlen = encode_huffman(skb, encoded, fb_priv_cpu->code_en)) == 0) {
+			drop = 1;
+			goto end;
+		}
 		/* printk(KERN_ERR "Newlen: %d\n", newlen);
 		eth_hdr(skb)->h_proto = htons(skb->len - 14); // Orig. len */
 
@@ -104,24 +116,28 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 
 		/* for (i = 0; i < (skb->len - (ETH_HDR_LEN+2)); i++) {
 			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+16+i));
-		} */		
+		} */
+end:		
 		kfree(encoded);
 		read_unlock(&fb_priv_cpu->tree_lock);
 	}
-	else if (*dir == TYPE_INGRESS) {
-		/* printk(KERN_ERR "HUFF DECODE detected!\n"); */
+	else if (*dir == TYPE_INGRESS && ntohs(eth_hdr(skb)->h_proto) == 0xacdc) {
+		 printk(KERN_ERR "HUFF DECODE detected!\n"); 
 		newlen = ntohs(*(unsigned short *)(skb->data));
+		printk(KERN_ERR "Newlen: %d\tSkb->len: %d\n", newlen, skb->len);
 		if ((decoded = kzalloc((newlen) * sizeof(char), GFP_ATOMIC)) == NULL) {
 			printk(KERN_ERR "Decoding failed!\n");
 			goto err;
 			}
 
-		/* for (i = 0; i < (skb->len -2); i++) {
-			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+2+i));
-		}*/
+		for (i = 0; i < (skb->len); i++) {
+			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+i));
+		}
 		read_lock(&fb_priv_cpu->tree_lock);
 		/* printk(KERN_ERR "len: %d\n", newlen); */
 		decode_huffman(skb, decoded, fb_priv_cpu->english_first->first);
+		/*decoded[newlen] = '\0';
+		printk(KERN_ERR "Decoded: %s\n", decoded);*/
 		newlen += 2; /* 2 Bytes for the length field */
 
 		if (newlen < skb->len)
@@ -136,7 +152,7 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 		kfree(decoded);
 		read_unlock(&fb_priv_cpu->tree_lock);
 
-}	
+	}	
 	
 	
 err:
@@ -497,13 +513,15 @@ static unsigned int decode_huffman(struct sk_buff * const skb, char *output,
 {
 	unsigned char path;
 	unsigned char iteration = 0;
-	unsigned short len = ntohs(eth_hdr(skb)->h_proto);
+	unsigned short len = ntohs(*(short *)(skb->data));
 	unsigned int origlen = len;
-	char *tempin = skb->data;
+	char *tempin = skb->data + 2;
 	char *tempout = output;
-	int bitstream = ntohl(*((int *)(tempin)));
+	int bitstream = *((int *)(tempin));
 	struct huffman_node *tmpnode;
-	printk(KERN_ERR "Proto:\t%x\n", len);
+	printk(KERN_ERR "Len: %d\n", len);
+	printk(KERN_ERR "Bitstream: 0x%8x\n", bitstream);
+	//printk(KERN_ERR "Proto:\t%x\n", len);
 	while (len-- != 0) {
 		tmpnode = node;
 		while (tmpnode->next[0] != NULL && tmpnode->next[1] != NULL) {
@@ -511,11 +529,12 @@ static unsigned int decode_huffman(struct sk_buff * const skb, char *output,
 			tmpnode = tmpnode->next[path];
 			if (unlikely(iteration == 32)) {
 				tempin += 4;
-				bitstream = ntohl(*((int *)(tempin)));
+				bitstream = *((int *)(tempin));
 				iteration = 0;
 			}
 		}
 		*tempout++ = tmpnode->character;
+		printk(KERN_ERR "Char: %c\n", tmpnode->character);
 	}
 return origlen;
 }
