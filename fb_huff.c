@@ -45,10 +45,10 @@ char longworddecode[64];*/
 					4025, 4253, 5987, 6094, 6327, 6749, 6966, 7507,
 					8167, 9056, 12700}};*/
 
-struct language_book english_book = {EALPHABETSZ + 1, {'0', 'z', 'q', 'x', 'j', 'k', 'v',
+struct language_book english_book = {EALPHABETSZ + 10, {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'z', 'q', 'x', 'j', 'k', 'v',
 					'b', 'p', 'y', 'g', 'f', 'w', 'm', 'u', 'c',
 					'l', 'd', 'r', 'h', 's', 'n', 'i', 'o', 'a',
-					't', 'e', ' '}, {3, 74, 95, 150, 153, 772, 978, 1492,
+					't', 'e', ' '}, {3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 74, 95, 150, 153, 772, 978, 1492,
 					1929, 1974, 2015, 2228, 2360, 2406, 2758, 2782,
 					4025, 4253, 5987, 6094, 6327, 6749, 6966, 7507,
 					8167, 9056, 12700, 14000}};
@@ -391,6 +391,7 @@ static void traverse_treev2(struct code_book *code_en, struct huffman_node *node
 		code = 0;
 		while(1) {
 			if (curr == node) {
+				printk(KERN_ERR "Currchar: %c\tIndex: %d\n", currchar, (unsigned char)currchar);
 				code_en->length[(unsigned char)currchar] = pos;
 				code_en->code[(unsigned char)currchar] = code;
 				break;
@@ -566,7 +567,7 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 
 		code = code_en->code[(unsigned char)*tempin]; // was - offset
 		if ((length = code_en->length[(unsigned char)*tempin]) == 0) { // was - offset
-			printk(KERN_ERR "Symbol %c not in alphabet!\n", *tempin);
+			printk(KERN_ERR "Symbol %c not in alphabet with index %d!\n", *tempin, (unsigned char)*tempin);
 			return 0;
 		}
 		printk(KERN_ERR "%c -> code: 0x%4x and length: %d\n", *tempin, code, length);
