@@ -56,7 +56,7 @@ struct language_book {
 
 struct code_book {
 	unsigned char alphabetsz;
-	unsigned short *code;
+	unsigned int *code;
 	unsigned char *length;
 };
 
