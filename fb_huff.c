@@ -45,15 +45,15 @@ char longworddecode[64];*/
 					4025, 4253, 5987, 6094, 6327, 6749, 6966, 7507,
 					8167, 9056, 12700}};*/
 
-struct language_book english_book = {EALPHABETSZ + 10, {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'z', 'q', 'x', 'j', 'k', 'v',
-					'b', 'p', 'y', 'g', 'f', 'w', 'm', 'u', 'c',
+/*struct language_book english_book = {EALPHABETSZ + 13, {'0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'z', 'q', 'x', 'j', 'k', 'v',
+					'b', '.', 'p', 'y', 'g', ',', 'f', 'w', '\n', 'm', 'u', 'c',
 					'l', 'd', 'r', 'h', 's', 'n', 'i', 'o', 'a',
 					't', 'e', ' '}, {3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 74, 95, 150, 153, 772, 978, 1492,
-					1929, 1974, 2015, 2228, 2360, 2406, 2758, 2782,
+					1500, 1929, 1974, 2000, 2015, 2228, 2300, 2360, 2406, 2758, 2782,
 					4025, 4253, 5987, 6094, 6327, 6749, 6966, 7507,
-					8167, 9056, 12700, 14000}};
+					8167, 9056, 12700, 14000}};*/
 
-/*struct language_book english_book = { 86, {'#', '%', '}', '{', '@', '$', '_', 'Z', '/', '[', ']', 'Q', 'K', '&', 'X', '6', '9', '7', '*', '3', '4', '(', ')', 'U', '8', '2', ':', '5', 'J', '1', 'R', 'L', 'G', '0', 'O', 'E', 'P', 'z', 'N', '!', 'F', 'j', 'S', 'Y', 'q', 'H', 'V', 'W', 'B', 'D', 'C', 'x', '\'', 'T', '?', 'A', 'M', ';', '-', 'I', 'k', 'v', '.', 'b', '\"', 'p', 'g', 'y', 'w', 'f', ',', 'c', 'm', '\n', 'u', 'l', 'd', 'r', 'h', 's', 'i', 'n', 'o', 'a', 't', 'e', ' ' },{1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 5, 5, 6, 6, 7, 7, 8, 11, 13, 33, 33, 34, 39, 41, 50, 53, 56, 60, 61, 65, 65, 65, 69, 74, 76, 79, 85, 86, 99, 136, 142, 158, 171, 172, 178, 221, 223, 308, 388, 467, 719, 818, 954, 1140, 1241, 1289, 1512, 1546, 1622, 1688, 1811, 1886, 2031, 2233, 2963, 3397, 4466, 4613, 4637, 4904, 5049, 5795, 5974, 6527, 9654, 15646}};*/
+struct language_book english_book = { 87, {'#', '%', '}', '{', '@', '$', '_', 'Z', '/', '[', ']', 'Q', 'K', '&', 'X', '6', '9', '7', '*', '3', '4', '(', ')', 'U', '8', '2', ':', '5', 'J', '1', 'R', 'L', 'G', '0', 'O', 'E', 'P', 'z', 'N', '!', 'F', 'j', 'S', 'Y', 'q', 'H', 'V', 'W', 'B', 'D', 'C', 'x', '\'', 'T', '?', 'A', 'M', ';', '-', 'I', 'k', 'v', '.', 'b', '\"', 'p', 'g', 'y', 'w', 'f', ',', 'c', 'm', '\n', 'u', 'l', 'd', 'r', 'h', 's', 'i', 'n', 'o', 'a', 't', 'e', ' ' },{1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 5, 5, 5, 5, 6, 6, 7, 7, 8, 11, 13, 33, 33, 34, 39, 41, 50, 53, 56, 60, 61, 65, 65, 65, 69, 74, 76, 79, 85, 86, 99, 136, 142, 158, 171, 172, 178, 221, 223, 308, 388, 467, 719, 818, 954, 1140, 1241, 1289, 1512, 1546, 1622, 1688, 1811, 1886, 2031, 2233, 2963, 3397, 4466, 4613, 4637, 4904, 5049, 5795, 5974, 6527, 9654, 15646}};
 
 struct fb_huffman_priv {
 	idp_t port[2];
@@ -247,7 +247,7 @@ static unsigned char struct_ctor(struct huffman_root *root, struct schedule_node
 				struct code_book *book, unsigned char len)
 {
 	book->alphabetsz = len;
-	if ((book->code = kzalloc(MAXALPHABETSZ * sizeof(unsigned short), GFP_ATOMIC)) == NULL)
+	if ((book->code = kzalloc(MAXALPHABETSZ * sizeof(unsigned int), GFP_ATOMIC)) == NULL)
 		return 0;
 	if ((book->length = kzalloc(MAXALPHABETSZ * sizeof(unsigned char), GFP_ATOMIC)) == NULL) {
 		kfree(book->code);
@@ -488,7 +488,7 @@ static struct huffman_node *extract_huffman_tree(struct schedule_node *first)
     return NULL;
 }
 
-static unsigned char append_code(unsigned short code, unsigned char length, unsigned char free,
+static unsigned char append_code(unsigned int code, unsigned char length, unsigned char free,
 					 int *bitstream, unsigned char mod)
 {
 	unsigned char modulo, leftover;
@@ -545,7 +545,7 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 {
 
 	unsigned char modulo, length;
-	unsigned short code;
+	unsigned int code;
 	unsigned char freebits = 32;
 	int bitstream = 0;
 	int counter = 0;
