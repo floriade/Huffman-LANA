@@ -20,6 +20,7 @@
 #include <linux/if_ether.h>
 #include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/timex.h>
 
 #include "xt_fblock.h"
 #include "xt_builder.h"
@@ -68,12 +69,16 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 			  struct sk_buff * const skb,
 			  enum path_type * const dir)
 {
-	int i = 0;
+	//int i = 0;
 	int drop = 0;
 	int newlen = 0;
+	int delta1, delta2;	
 	unsigned int seq;
 	char *decoded, *encoded;
 	struct fb_huffman_priv __percpu *fb_priv_cpu;
+	cycles_t start, finish, diff;
+
+	start = get_cycles();
 
 	fb_priv_cpu = this_cpu_ptr(rcu_dereference_raw(fb->private_data));
 #ifdef __DEBUG
@@ -83,35 +88,42 @@ static int fb_huffman_netrx(const struct fblock * const fb,
 	do {
 		seq = read_seqbegin(&fb_priv_cpu->lock); 
 		write_next_idp_to_skb(skb, fb->idp, fb_priv_cpu->port[*dir]);
-		if (fb_priv_cpu->port[*dir] == IDP_UNKNOWN || skb_linearize(skb)) {
+		if (unlikely(fb_priv_cpu->port[*dir] == IDP_UNKNOWN || skb_linearize(skb))) {
 			drop = 1;	/* skb_linearize(skb) checks if buffer is linear */
 			goto err;	/* if not -> linearize. Fail returns != 0 */
 		}
 	} while (read_seqretry(&fb_priv_cpu->lock, seq));
-	//printk(KERN_ERR "Type: 0x%4x\n", ntohs(eth_hdr(skb)->h_proto));
+
 	if (*dir == TYPE_EGRESS && ntohs(eth_hdr(skb)->h_proto) == 0xacdc) {	/* temp Fix */
+
 		/* printk(KERN_ERR "HUFF ENCODE detected\n"); */
-		if ((encoded = kzalloc(skb->len * 2 * sizeof(char), GFP_ATOMIC)) == NULL) {
-			printk(KERN_ERR "Encoding failed!\n");
+
+		if (unlikely((encoded = kzalloc(skb->len * 3 * sizeof(char), GFP_ATOMIC)) == NULL)) {
+			printk(KERN_ERR "Encoding failed!\n"); // some chars > 2 Bytes!
 			goto err;
 		}
+
 		read_lock(&fb_priv_cpu->tree_lock);
 		//printk(KERN_ERR "Skb len: %d\n", skb->len);
 		//printk(KERN_ERR "My len: %d\n", ntohs(*(unsigned short *)(skb->data + ETH_HDR_LEN)));
 
-		if ((newlen = encode_huffman(skb, encoded, fb_priv_cpu->code_en)) == 0) {
+		if (unlikely((newlen = encode_huffman(skb, encoded, fb_priv_cpu->code_en)) == 0)) {
 			drop = 1;
 			goto end;
 		}
 		/* printk(KERN_ERR "Newlen: %d\n", newlen);
 		eth_hdr(skb)->h_proto = htons(skb->len - 14); // Orig. len */
 
-		if (newlen < skb->len) {
+		if (likely(newlen < skb->len)) {
 			skb_trim(skb, newlen);
 		}			
-		else if (newlen > skb->len) {
-			skb_put(skb, (newlen - skb->len));
+		else if ((delta1 = newlen - skb->len) > 0) { /* delta1 is additional memory */
+			if (unlikely((delta2 = delta1 - skb_tailroom(skb)) > 0)) /* delta2 is add. mem. to be allocated */
+				pskb_expand_head(skb, 0, delta2, GFP_ATOMIC);
+			skb_put(skb, delta1);
 		}
+
+
 		memcpy((skb->data + ETH_HDR_LEN + 2), encoded, newlen - (ETH_HDR_LEN+2));
 
 		/* for (i = 0; i < (skb->len - (ETH_HDR_LEN+2)); i++) {
@@ -122,17 +134,21 @@ end:
 		read_unlock(&fb_priv_cpu->tree_lock);
 	}
 	else if (*dir == TYPE_INGRESS && ntohs(eth_hdr(skb)->h_proto) == 0xacdc) {
+
 		 printk(KERN_ERR "HUFF DECODE detected!\n"); 
+
 		newlen = ntohs(*(unsigned short *)(skb->data));
+
 		printk(KERN_ERR "Newlen: %d\tSkb->len: %d\n", newlen, skb->len);
-		if ((decoded = kzalloc((newlen) * sizeof(char), GFP_ATOMIC)) == NULL) {
+
+		if (unlikely((decoded = kzalloc((newlen) * sizeof(char), GFP_ATOMIC)) == NULL)) {
 			printk(KERN_ERR "Decoding failed!\n");
 			goto err;
 			}
 
-		for (i = 0; i < (skb->len); i++) {
+		/*for (i = 0; i < (skb->len); i++) {
 			printk(KERN_ERR "Skb Data 0x%2x\n", *(skb->data+i));
-		}
+		}*/
 		read_lock(&fb_priv_cpu->tree_lock);
 		/* printk(KERN_ERR "len: %d\n", newlen); */
 		decode_huffman(skb, decoded, fb_priv_cpu->english_first->first);
@@ -140,10 +156,14 @@ end:
 		printk(KERN_ERR "Decoded: %s\n", decoded);*/
 		newlen += 2; /* 2 Bytes for the length field */
 
-		if (newlen < skb->len)
+		if (unlikely(newlen < skb->len)) {
 			skb_trim(skb, newlen);
-		else if (newlen > skb->len)
-			skb_put(skb, (newlen - skb->len));
+		}
+		else if ((delta1 = newlen - skb->len) > 0) { /* delta1 is additional memory */
+			if (unlikely((delta2 = delta1 - skb_tailroom(skb)) > 0)) /* delta2 is add. mem. to be allocated */
+				pskb_expand_head(skb, 0, delta2, GFP_ATOMIC);
+			skb_put(skb, delta1);
+		}
 
 		memcpy(skb->data+2, decoded, newlen-2);
 		/* *(char *)(skb->data+2+newlen) = '\0';
@@ -156,7 +176,12 @@ end:
 	
 	
 err:
-	if (drop) {
+	finish = get_cycles();
+	diff = (finish > start) ? finish-start : finish + (((unsigned long long)(0) - 1) - start);
+	printk(KERN_ERR "Nr cycles: %lld\n", diff);
+
+	if (unlikely(drop)) {
+		printk(KERN_ERR "Packet dropped in Huff\n");
 		kfree_skb(skb);
 		return PPE_DROPPED;
 	}
@@ -613,9 +638,10 @@ static unsigned int encode_huffman(struct sk_buff * const skb, char *output,
 		memcpy(tempout, &endian, 1 * sizeof(char));
 		counter += 1;
 	}*/
-
-	memcpy(tempout, &bitstream, 4 * sizeof(char));
-	counter += 4;
+	if (freebits != 32) {
+		memcpy(tempout, &bitstream, 4 * sizeof(char));
+		counter += 4;
+	}
 	return counter + ETH_HDR_LEN + 2; /* + MAC HEADER */
 //	memcpy(tempout, &bitstream, sizeof(int)); /* copy remaining sequence */
 }
